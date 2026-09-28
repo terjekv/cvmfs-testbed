@@ -1,4 +1,4 @@
-FROM ubuntu:24.04
+FROM docker.io/library/ubuntu:24.04
 
 ARG CVMFS_VERSION=2.14.1
 ENV DEBIAN_FRONTEND=noninteractive

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -29,13 +30,14 @@ class TestbedError(Exception):
     pass
 
 
-def run(command, *, capture=False, timeout=300):
+def run(command, *, capture=False, timeout=300, merge_stderr=False):
     try:
         result = subprocess.run(
             [str(arg) for arg in command],
             check=True,
             text=True,
             stdout=subprocess.PIPE if capture else sys.stderr,
+            stderr=subprocess.STDOUT if merge_stderr else None,
             timeout=timeout,
         )
         return result.stdout if capture else ""
@@ -58,6 +60,58 @@ def write_json(path, value):
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, indent=2) + "\n")
     temporary.replace(path)
+
+
+def runtime_command(runtime, sudo=False):
+    executable = shutil.which(runtime)
+    if not executable:
+        raise TestbedError(f"Required executable not found: {runtime}")
+    return (["sudo", "-n"] if sudo else []) + [executable]
+
+
+def select_runtime(requested, sudo=False):
+    failures = []
+    for runtime in ("docker", "podman") if requested == "auto" else (requested,):
+        try:
+            command = runtime_command(runtime, sudo)
+            info = json.loads(
+                run(command + ["info", "--format", "{{json .}}"], capture=True)
+            )
+            host = info.get("host", {}) if runtime == "podman" else info
+            if host.get("os", host.get("OSType")) != "linux":
+                raise TestbedError("The container engine must run Linux containers")
+            if runtime == "podman":
+                if host.get("security", {}).get("rootless"):
+                    raise TestbedError(
+                        "Podman requires rootful containers for FUSE/OverlayFS; use up --runtime podman --sudo"
+                    )
+                run(
+                    runtime_command("podman-compose", sudo) + ["--version"],
+                    capture=True,
+                )
+            else:
+                run(command + ["compose", "version"], capture=True)
+            return runtime, host.get("arch", host.get("Architecture"))
+        except (TestbedError, ValueError) as error:
+            failures.append(f"{runtime}: {error}")
+    raise TestbedError("No usable container runtime: " + "; ".join(failures))
+
+
+def network_info(network):
+    if "name" in network:  # Podman uses the netavark network schema.
+        return network["name"], {
+            "id": network["id"],
+            "driver": network["driver"],
+            "ipam": [
+                {"Subnet": subnet["subnet"], "Gateway": subnet.get("gateway")}
+                for subnet in network.get("subnets", [])
+            ],
+        }
+    return network["Name"], {
+        "id": network["Id"],
+        "driver": network["Driver"],
+        "ipam": network["IPAM"].get("Config") or [],
+    }
 
 
 def parse_manifest(data, expected_name):
@@ -121,7 +175,7 @@ def probe(endpoints):
 
 
 def container_info(container):
-    """Expose operational/network fields without leaking Docker environment data."""
+    """Expose operational/network fields without leaking container environment data."""
     state = container["State"]
     networks = {}
     for name, network in (
@@ -153,7 +207,7 @@ def container_info(container):
         "state": state["Status"],
         "running": state["Running"],
         "paused": state.get("Paused", False),
-        "health": state.get("Health", {}).get("Status"),
+        "health": (state.get("Health") or state.get("Healthcheck") or {}).get("Status"),
         "exit_code": state.get("ExitCode"),
         "networks": networks,
         "published_ports": ports,
@@ -172,15 +226,34 @@ class Testbed:
             r"[a-z0-9][a-z0-9_-]{0,47}", state.get("project", "")
         ):
             raise TestbedError("Invalid testbed state")
+        if state.get("runtime", "docker") not in ("docker", "podman") or not isinstance(
+            state.get("sudo", False), bool
+        ):
+            raise TestbedError("Invalid runtime in testbed state")
         return state
+
+    def engine(self, *arguments, capture=False, timeout=300):
+        state = self.state()
+        return run(
+            runtime_command(state.get("runtime", "docker"), state.get("sudo", False))
+            + list(arguments),
+            capture=capture,
+            timeout=timeout,
+        )
 
     def compose(self, *arguments, capture=False, timeout=300):
         state = self.state()
+        if state.get("runtime", "docker") == "podman":
+            command = runtime_command("podman-compose", state.get("sudo", False)) + [
+                "--in-pod",
+                "false",
+            ]
+        else:
+            command = runtime_command("docker", state.get("sudo", False)) + ["compose"]
         # Explicit --env-file and absolute --file make commands independent of cwd.
         return run(
-            [
-                "docker",
-                "compose",
+            command
+            + [
                 "--project-name",
                 state["project"],
                 "--env-file",
@@ -194,36 +267,65 @@ class Testbed:
         )
 
     def execute(self, service, *arguments, capture=False):
-        return self.compose("exec", "-T", service, *arguments, capture=capture)
+        return self.engine(
+            "exec", self.container_id(service), *arguments, capture=capture
+        )
+
+    def containers(self):
+        ids = self.engine(
+            "ps",
+            "-aq",
+            "--filter",
+            f"label=com.docker.compose.project={self.state()['project']}",
+            capture=True,
+        ).split()
+        return json.loads(self.engine("inspect", *ids, capture=True)) if ids else []
+
+    def container_id(self, service):
+        matches = [
+            container["Id"]
+            for container in self.containers()
+            if container["Config"]["Labels"].get("com.docker.compose.service")
+            == service
+        ]
+        if len(matches) != 1:
+            raise TestbedError(
+                f"Expected one container for {service}, found {len(matches)}"
+            )
+        return matches[0]
+
+    def copy(self, source, destination):
+        def resolve(value):
+            service, separator, path = value.partition(":")
+            return (
+                self.container_id(service) + separator + path
+                if separator and service in (*SERVICES, "s1-s3-worker")
+                else value
+            )
+
+        return self.engine("cp", resolve(source), resolve(destination))
 
     def inspect(self):
         state = self.state()
-        ids = self.compose("ps", "--all", "--quiet", capture=True).split()
-        containers = (
-            json.loads(run(["docker", "inspect", *ids], capture=True)) if ids else []
-        )
+        containers = self.containers()
         network_name = state["project"] + "_network"
-        network_ids = run(
-            [
-                "docker",
-                "network",
-                "ls",
-                "--quiet",
-                "--filter",
-                f"label=com.docker.compose.project={state['project']}",
-            ],
+        network_ids = self.engine(
+            "network",
+            "ls",
+            "--quiet",
+            "--filter",
+            f"label=com.docker.compose.project={state['project']}",
             capture=True,
         ).split()
         networks = (
-            json.loads(
-                run(["docker", "network", "inspect", *network_ids], capture=True)
-            )
+            json.loads(self.engine("network", "inspect", *network_ids, capture=True))
             if network_ids
             else []
         )
         return {
             "schema": 1,
             "project": state["project"],
+            "runtime": state.get("runtime", "docker"),
             "services": {
                 container["Config"]["Labels"][
                     "com.docker.compose.service"
@@ -235,13 +337,9 @@ class Testbed:
                 != "true"
             },
             "networks": {
-                network["Name"]: {
-                    "id": network["Id"],
-                    "driver": network["Driver"],
-                    "ipam": network["IPAM"].get("Config") or [],
-                }
-                for network in networks
-                if network["Name"] == network_name
+                name: info
+                for name, info in map(network_info, networks)
+                if name == network_name
             },
         }
 
@@ -253,11 +351,7 @@ class Testbed:
             raise TestbedError(
                 "This state directory already owns a deployment; use status/start or down before up"
             )
-        engine = json.loads(
-            run(["docker", "info", "--format", "{{json .}}"], capture=True)
-        )
-        if engine["OSType"] != "linux":
-            raise TestbedError("The Docker engine must run Linux containers")
+        runtime, architecture = select_runtime(args.runtime, args.sudo)
         platform = args.platform
         if platform == "auto":
             arch = {
@@ -265,13 +359,12 @@ class Testbed:
                 "arm64": "arm64",
                 "x86_64": "amd64",
                 "amd64": "amd64",
-            }.get(engine["Architecture"])
+            }.get(architecture)
             if not arch:
                 raise TestbedError(
-                    f"Unsupported Docker architecture: {engine['Architecture']}"
+                    f"Unsupported container architecture: {architecture}"
                 )
             platform = "linux/" + arch
-        run(["docker", "compose", "version"], capture=True)
         project = (
             args.project_name
             or "cvmfs-testbed-"
@@ -282,8 +375,8 @@ class Testbed:
         if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", args.cvmfs_version):
             raise TestbedError("CernVM-FS version must have the form X.Y.Z")
         existing = run(
-            [
-                "docker",
+            runtime_command(runtime, args.sudo)
+            + [
                 "ps",
                 "-aq",
                 "--filter",
@@ -298,13 +391,15 @@ class Testbed:
         state = {
             "schema": 1,
             "project": project,
+            "runtime": runtime,
+            "sudo": args.sudo,
             "platform": platform,
             "cvmfs_version": args.cvmfs_version,
         }
         write_json(self.state_path, state)
         (self.directory / "runtime.env").write_text(
             f"TESTBED_PROJECT={project}\nTESTBED_PLATFORM={platform}\n"
-            f"CVMFS_VERSION={args.cvmfs_version}\nTESTBED_IMAGE=cvmfs-testbed-server:{args.cvmfs_version}-{platform.split('/')[1]}\n"
+            f"CVMFS_VERSION={args.cvmfs_version}\nTESTBED_IMAGE=localhost/cvmfs-testbed-server:{args.cvmfs_version}-{platform.split('/')[1]}\n"
         )
         try:
             # Build/pull before assigning host ports to minimize the reservation
@@ -324,11 +419,9 @@ class Testbed:
                 "up",
                 "--detach",
                 "--no-build",
-                "--wait",
-                "--wait-timeout",
-                "90",
                 timeout=300,
             )
+            self.wait_services((*SERVICES, "s1-s3-worker"))
             self.write_endpoints()
             self.wait_http("s0")
             self.wait_http("s1")
@@ -345,9 +438,7 @@ class Testbed:
             keys = self.directory / "keys"
             keys.mkdir(exist_ok=True)
             for repo in REPOSITORIES:
-                self.compose(
-                    "cp", f"s0:/public-keys/{repo}.pub", str(keys / f"{repo}.pub")
-                )
+                self.copy(f"s0:/public-keys/{repo}.pub", str(keys / f"{repo}.pub"))
             self.wait(synced=True, timeout=90)
             endpoints = read_json(self.endpoint_path)
             proxy = urllib.request.build_opener(
@@ -373,7 +464,7 @@ class Testbed:
         for service in (*SERVERS, "squid"):
             port = "3128" if service == "squid" else "80"
             address = (
-                self.compose("port", service, port, capture=True)
+                self.engine("port", self.container_id(service), port, capture=True)
                 .strip()
                 .splitlines()[0]
             )
@@ -385,6 +476,7 @@ class Testbed:
             {
                 "schema": 1,
                 "project": state["project"],
+                "runtime": state.get("runtime", "docker"),
                 "network": state["project"] + "_network",
                 "repositories": list(REPOSITORIES),
                 "host": host,
@@ -406,6 +498,26 @@ class Testbed:
                 time.sleep(0.5)
         raise TestbedError(f"Timed out waiting for {service} HTTP")
 
+    def wait_services(self, services, timeout=90):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            current = {
+                c["Config"]["Labels"].get("com.docker.compose.service"): container_info(
+                    c
+                )
+                for c in self.containers()
+            }
+            if all(
+                service in current
+                and current[service]["running"]
+                and not current[service]["paused"]
+                and current[service]["health"] in (None, "healthy")
+                for service in services
+            ):
+                return
+            time.sleep(0.5)
+        raise TestbedError(f"Timed out waiting for services: {', '.join(services)}")
+
     def wait(self, *, synced=False, timeout=60):
         deadline = time.monotonic() + timeout
         last = None
@@ -419,10 +531,11 @@ class Testbed:
     def control(self, operation, service):
         targets = ["s1-s3", "s1-s3-worker"] if service == "s1-s3" else [service]
         verb = {"resume": "unpause"}.get(operation, operation)
-        options = ("--wait", "--wait-timeout", "90") if operation == "start" else ()
-        self.compose(verb, *options, *targets)
-        if operation == "start" and service in SERVERS:
-            self.wait_http(service)
+        self.engine(verb, *(self.container_id(target) for target in targets))
+        if operation == "start":
+            self.wait_services(targets)
+            if service in SERVERS:
+                self.wait_http(service)
 
     def publish(self, args):
         source = None
@@ -433,7 +546,7 @@ class Testbed:
         destination = "/tmp/testbed-import-" + uuid.uuid4().hex if source else ""
         try:
             if source:
-                self.compose("cp", str(source) + "/.", "s0:" + destination)
+                self.copy(str(source) + "/.", "s0:" + destination)
             self.repository("s0", "publish", args.repository, args.message, destination)
         finally:
             if source:
@@ -449,15 +562,56 @@ class Testbed:
             for repo in (args.repository,) if args.repository else REPOSITORIES:
                 self.repository(service, "replicate", repo)
 
+    def client_read(self, repository, path):
+        state = self.state()
+        image = f"localhost/cvmfs-testbed-server:{state['cvmfs_version']}-{state['platform'].split('/')[1]}"
+        s0 = next(
+            c
+            for c in self.containers()
+            if c["Config"]["Labels"].get("com.docker.compose.service") == "s0"
+        )
+        keys = next(
+            mount["Name"]
+            for mount in s0["Mounts"]
+            if mount["Destination"] == "/public-keys"
+        )
+        return self.engine(
+            "run",
+            "--rm",
+            "--init",
+            "--privileged",
+            "--network",
+            state["project"] + "_network",
+            "--volume",
+            keys + ":/public-keys:ro",
+            "--entrypoint",
+            "/opt/testbed/client-read.sh",
+            image,
+            repository,
+            path,
+            capture=True,
+        )
+
     def logs(self, output):
         directory = Path(output).resolve()
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "compose.log").write_text(
-            self.compose("logs", "--no-color", capture=True)
-        )
-        (directory / "containers.json").write_text(
-            self.compose("ps", "--all", "--format", "json", capture=True)
-        )
+        # Both engines write parts of their logs to stderr, so capture both streams.
+        with (directory / "compose.log").open("w") as log:
+            for container in self.containers():
+                log.write(f"\n=== {container['Name']} ===\n")
+                log.flush()
+                state = self.state()
+                log.write(
+                    run(
+                        runtime_command(
+                            state.get("runtime", "docker"), state.get("sudo", False)
+                        )
+                        + ["logs", container["Id"]],
+                        capture=True,
+                        merge_stderr=True,
+                        timeout=60,
+                    )
+                )
         write_json(directory / "inspect.json", self.inspect())
         for filename in ("state.json", "endpoints.json"):
             path = self.directory / filename
@@ -473,7 +627,7 @@ class Testbed:
             target = directory / service
             target.mkdir(exist_ok=True)
             try:
-                self.compose("cp", f"{service}:{path}/.", str(target))
+                self.copy(f"{service}:{path}/.", str(target))
             except TestbedError as error:
                 print(f"Optional log collection: {error}", file=sys.stderr)
         print(directory)
@@ -481,7 +635,14 @@ class Testbed:
     def down(self):
         if not self.state_path.exists():
             return
-        self.compose("down", "--volumes", "--remove-orphans", "--timeout", "10")
+        for container in self.containers():
+            if container["State"].get("Paused"):
+                self.engine("unpause", container["Id"])
+        self.compose("down", "--volumes", "--remove-orphans")
+        if self.containers():
+            raise TestbedError(
+                "Containers remain after teardown; state retained for retry"
+            )
         for name in ("state.json", "runtime.env", "endpoints.json"):
             (self.directory / name).unlink(missing_ok=True)
         for repo in REPOSITORIES:
@@ -511,6 +672,17 @@ def parser():
         "up", help="Build, start, seed and synchronize a fresh testbed"
     )
     up.add_argument("--project-name")
+    up.add_argument(
+        "--runtime",
+        choices=("auto", "docker", "podman"),
+        default="auto",
+        help="Prefer Docker, then Podman, or select explicitly",
+    )
+    up.add_argument(
+        "--sudo",
+        action="store_true",
+        help="Run the container engine and Compose provider through sudo -n",
+    )
     up.add_argument(
         "--platform",
         choices=("auto", "linux/amd64", "linux/arm64"),
@@ -606,16 +778,7 @@ def main(argv=None):
                             "Client path must be relative and cannot contain '..'"
                         )
                     print(
-                        bed.compose(
-                            "run",
-                            "--rm",
-                            "--no-deps",
-                            "-T",
-                            "client",
-                            args.repository,
-                            args.path,
-                            capture=True,
-                        ),
+                        bed.client_read(args.repository, args.path),
                         end="",
                     )
                 elif args.command == "exec":

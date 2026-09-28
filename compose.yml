@@ -57,7 +57,7 @@ services:
       - public-keys:/public-keys:ro
 
   object-store:
-    image: chrislusf/seaweedfs:4.47
+    image: docker.io/chrislusf/seaweedfs:4.47
     platform: ${TESTBED_PLATFORM}
     command:
       - server
@@ -70,15 +70,17 @@ services:
       - -s3.config=/etc/seaweedfs/s3.json
     volumes:
       - object-data:/data
-      - ./containers/s3/identities.json:/etc/seaweedfs/s3.json:ro
+      - ./containers/s3/identities.json:/etc/seaweedfs/s3.json:ro,z
     networks: [testbed]
 
   s1-s3:
-    image: nginx:1.28.0-alpine
+    image: docker.io/library/nginx:1.28.0-alpine
     platform: ${TESTBED_PLATFORM}
     ports: ["127.0.0.1:${S3_PORT:-0}:80"]
     volumes:
-      - ./containers/s3/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./containers/s3/nginx.conf:/etc/nginx/testbed.conf.template:ro,z
+      - ./containers/s3/start-nginx.sh:/opt/testbed/start-nginx.sh:ro,z
+    entrypoint: [/bin/sh, /opt/testbed/start-nginx.sh]
     networks:
       testbed:
         aliases: [s1-s3.testbed.test]

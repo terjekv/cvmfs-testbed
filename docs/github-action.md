@@ -6,9 +6,10 @@ The action runs the same controller and Compose file as the local CLI.
 
 ## Runner requirements
 
-Use a Linux VM with Python 3, Bash, Docker Compose, and permission to run
-privileged containers. The repository's CI exercises `ubuntu-24.04` and
-`ubuntu-24.04-arm`. The action selects the Docker engine's native architecture.
+Use a Linux VM with Python 3, Bash, Docker Compose or rootful Podman with
+`podman-compose` 1.5+, and permission to run privileged containers. The
+repository's CI exercises both engines on `ubuntu-24.04` and
+`ubuntu-24.04-arm`. The action selects the engine's native architecture.
 Single-CPU `ubuntu-slim` runners cannot perform the required privileged mounts.
 
 The job can use `pull_request` with `contents: read`. No cloud account, write
@@ -24,6 +25,8 @@ disposable GitHub-hosted VM runners fit this use case.
 | `project-name` | Derived from the state directory | Optional explicit Compose project name |
 | `cvmfs-version` | `2.14.1` | Exact CernVM-FS release series to install |
 | `platform` | `auto` | `auto`, `linux/amd64`, or `linux/arm64` |
+| `runtime` | `auto` | Prefer Docker then Podman; `docker` or `podman` selects explicitly |
+| `sudo` | `false` | Run the engine/provider through `sudo -n`, for rootful Podman |
 | `cleanup` | `true` | Remove containers and volumes in the post-job step |
 
 Use separate state directories/project names for independent deployments. The
@@ -37,7 +40,7 @@ multiple deployments, address each with `cvmfs-testbed --state-dir PATH ...`.
 | `state-directory` | Absolute directory containing controller state |
 | `endpoints-file` | Absolute path to `endpoints.json` |
 | `keys-directory` | Public signing keys |
-| `network` | Docker network name for containerized consumers |
+| `network` | Container network name for consumers using the same engine |
 | `s0-url`, `s1-url`, `s1-s3-url` | HTTP origins reachable from the runner host |
 | `proxy-url` | Squid forward-proxy URL reachable from the runner host |
 
@@ -48,6 +51,26 @@ from containers attached to `network`.
 Call `cvmfs-testbed inspect` in any subsequent step for live service IPs, network
 aliases, subnets, port bindings, and running/paused/health state. These are queried
 at call time; the action outputs contain the stable connection URLs.
+
+## Podman runners
+
+Install Podman and `podman-compose` as described in [local setup](local.md#podman-on-linux),
+then select them in the action:
+
+```yaml
+- uses: terjekv/cvmfs-testbed@main
+  id: testbed
+  with:
+    runtime: podman
+    sudo: 'true'
+- run: cvmfs-testbed client-read software.testbed.test README.txt
+```
+
+The CLI remembers this choice, including during post-job cleanup. No Docker
+installation or Docker socket is needed. Our [CI workflow](../.github/workflows/ci.yml)
+includes the provider installation and exercises the same failure scenarios on
+both runtimes. For containerized consumers below, use `sudo podman run` in place
+of `docker run` when the testbed uses rootful Podman.
 
 ## Outage test in a PR
 
@@ -61,7 +84,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: terjekv/cvmfs-testbed@main
         id: testbed
       - name: Exercise outage
@@ -78,7 +101,7 @@ jobs:
       - name: Collect diagnostics
         if: always()
         run: cvmfs-testbed logs --output artifacts/testbed
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: testbed-logs
@@ -97,7 +120,7 @@ after successful setup. To upload diagnostics even when setup itself fails, use
 an explicit state path and check out the harness at a known location:
 
 ```yaml
-- uses: actions/checkout@v4
+- uses: actions/checkout@v7
   with:
     repository: terjekv/cvmfs-testbed
     path: .testbed-action
@@ -110,7 +133,7 @@ an explicit state path and check out the harness at a known location:
   env:
     CVMFS_TESTBED_STATE: ${{ runner.temp }}/cvmfs-testbed
   run: .testbed-action/bin/cvmfs-testbed logs --output artifacts/testbed
-- uses: actions/upload-artifact@v4
+- uses: actions/upload-artifact@v7
   if: always()
   with:
     name: testbed-logs

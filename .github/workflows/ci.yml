@@ -11,11 +11,11 @@ jobs:
   checks:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.9'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
       - name: Python unit tests
@@ -23,26 +23,37 @@ jobs:
       - name: Action lifecycle tests
         run: node --test tests/action.test.js
       - name: Shell checks
-        run: shellcheck bin/cvmfs-testbed containers/server/*.sh
+        run: shellcheck bin/cvmfs-testbed containers/server/*.sh containers/s3/*.sh
 
   integration:
-    name: Live testbed (${{ matrix.runner }})
+    name: Live testbed (${{ matrix.runtime }}, ${{ matrix.runner }})
     needs: checks
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        runtime: [docker, podman]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     env:
       CVMFS_TESTBED_STATE: ${{ github.workspace }}/.cvmfs-testbed
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - name: Install Podman Compose
+        if: matrix.runtime == 'podman'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman python3-venv
+          sudo python3 -m venv /opt/testbed-podman-compose
+          sudo /opt/testbed-podman-compose/bin/pip install podman-compose==1.5.0
+          sudo ln -s /opt/testbed-podman-compose/bin/podman-compose /usr/local/bin/podman-compose
       - name: Start proposed action
         id: testbed
         uses: ./
         with:
           state-directory: ${{ env.CVMFS_TESTBED_STATE }}
+          runtime: ${{ matrix.runtime }}
+          sudo: ${{ matrix.runtime == 'podman' && 'true' || 'false' }}
       - name: Verify action outputs and CLI installation
         env:
           S0_URL: ${{ steps.testbed.outputs.s0-url }}
@@ -55,9 +66,9 @@ jobs:
       - name: Collect diagnostics
         if: always()
         run: ./bin/cvmfs-testbed logs --output artifacts/testbed
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: testbed-${{ matrix.runner }}
+          name: testbed-${{ matrix.runtime }}-${{ matrix.runner }}
           path: artifacts/testbed
           retention-days: 7

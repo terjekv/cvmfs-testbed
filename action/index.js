@@ -4,10 +4,12 @@ const path = require('node:path');
 const { root, write, invoke } = require('./common');
 
 try {
-  if (process.platform !== 'linux') throw new Error('This action requires a Linux runner with Docker and mount privileges');
+  if (process.platform !== 'linux') throw new Error('This action requires a Linux runner with Docker or rootful Podman and mount privileges');
   const input = name => process.env[`INPUT_${name.toUpperCase()}`] || '';
   const cleanup = input('cleanup') || 'true';
   if (!['true', 'false'].includes(cleanup)) throw new Error('cleanup must be true or false');
+  const sudo = input('sudo') || 'false';
+  if (!['true', 'false'].includes(sudo)) throw new Error('sudo must be true or false');
   const state = input('state-directory')
     ? path.resolve(input('state-directory'))
     : fs.mkdtempSync(path.join(process.env.RUNNER_TEMP, 'cvmfs-testbed-'));
@@ -16,6 +18,8 @@ try {
   write(process.env.GITHUB_STATE, 'testbed_state', state);
   write(process.env.GITHUB_STATE, 'testbed_cleanup', cleanup);
   const args = ['up', '--cvmfs-version', input('cvmfs-version') || '2.14.1', '--platform', input('platform') || 'auto'];
+  args.push('--runtime', input('runtime') || 'auto');
+  if (sudo === 'true') args.push('--sudo');
   if (input('project-name')) args.push('--project-name', input('project-name'));
   invoke(state, args);
   const endpoints = JSON.parse(fs.readFileSync(path.join(state, 'endpoints.json'), 'utf8'));

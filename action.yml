@@ -9,14 +9,20 @@ inputs:
     description: State directory (defaults to a unique directory under runner.temp).
     required: false
   project-name:
-    description: Optional unique Docker Compose project name.
+    description: Optional unique Compose project name.
     required: false
   cvmfs-version:
     description: CernVM-FS package version.
     default: '2.14.1'
   platform:
-    description: Docker platform; auto selects the Linux engine's native architecture.
+    description: Container platform; auto selects the Linux engine's native architecture.
     default: auto
+  runtime:
+    description: auto prefers Docker then Podman; docker or podman selects explicitly.
+    default: auto
+  sudo:
+    description: Run the engine and Compose provider with sudo -n (rootful Podman).
+    default: 'false'
   cleanup:
     description: Remove the deployment in the post-job step.
     default: 'true'
@@ -24,11 +30,11 @@ outputs:
   state-directory:
     description: Directory containing testbed state and endpoints.json.
   endpoints-file:
-    description: JSON containing host URLs, Docker network URLs, repositories, and public keys.
+    description: JSON containing host URLs, container network URLs, repositories, and public keys.
   keys-directory:
     description: Directory containing the generated public signing keys.
   network:
-    description: Docker network to join from containerized tests.
+    description: Container network to join from containerized tests.
   s0-url:
     description: Stratum 0 origin reachable from the runner host.
   s1-url:

@@ -17,9 +17,10 @@ For existing CERN and community tooling, see [related projects](docs/related-pro
 
 ## Run locally
 
-Requirements: Python 3.9+, Bash, Docker with Compose v2 or newer, and a Linux
-Docker engine that permits privileged containers and FUSE/OverlayFS mounts.
-Linux hosts and Docker Desktop on macOS are supported paths. Native amd64 and
+Requirements: Python 3.9+, Bash, and either Docker with Compose v2+ or rootful
+Podman 4.9+ with `podman-compose` 1.5+. The Linux engine must permit privileged
+containers and FUSE/OverlayFS mounts. Linux hosts and Docker Desktop on macOS
+are supported paths. Native amd64 and
 arm64 images are selected automatically. Use native containers: x86 emulation on
 Apple Silicon can break the publisher's file-descriptor locking.
 
@@ -32,9 +33,15 @@ cd cvmfs-testbed
 ./bin/cvmfs-testbed client-read software.testbed.test README.txt
 ```
 
+`up --runtime auto` (the default) tries Docker first, then Podman. On a Linux
+host with Podman, use `./bin/cvmfs-testbed up --runtime podman --sudo` to run the
+engine as root while keeping the controller and state directory owned by you.
+The runtime and sudo setting are remembered for subsequent commands. See
+[Podman setup](docs/local.md#podman-on-linux) for installation and requirements.
+
 The first run builds the server image and downloads its packages. Later runs use
-Docker's build cache. `up` prints JSON with the dynamically assigned localhost
-URLs, the Docker network name, container URLs, repository names, and public key
+the engine's build cache. `up` prints JSON with the dynamically assigned localhost
+URLs, the container network name, container URLs, repository names, and public key
 directory. The same data is saved in `.cvmfs-testbed/endpoints.json`.
 
 ```bash
@@ -75,7 +82,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: terjekv/cvmfs-testbed@main # Pin a commit SHA for reproducible CI.
         id: testbed
         with:
@@ -92,7 +99,7 @@ jobs:
       - name: Collect diagnostics
         if: always()
         run: cvmfs-testbed logs --output artifacts/testbed
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: testbed-logs
@@ -155,7 +162,7 @@ and compatibility. See [architecture, data flow, and limitations](docs/architect
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 node --test tests/action.test.js
-shellcheck bin/cvmfs-testbed containers/server/*.sh
+shellcheck bin/cvmfs-testbed containers/server/*.sh containers/s3/*.sh
 actionlint
 
 ./bin/cvmfs-testbed up
@@ -166,3 +173,9 @@ python3 tests/integration.py
 The integration suite changes repository content, tests selective replication,
 reads through FUSE, verifies a Squid cache hit, and stops/restarts the publisher,
 both replica endpoints, and object storage. It needs no production services.
+CI runs this suite on Docker and rootful Podman, on both amd64 and arm64.
+
+GitHub-maintained actions in CI and examples use their latest stable major
+versions, checked on 2026-09-28: checkout/upload-artifact v7.0.1 and
+setup-node/setup-python v7.0.0. Dependabot checks workflow actions weekly;
+when updating a major version, update the matching documentation examples too.

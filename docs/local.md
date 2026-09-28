@@ -2,27 +2,58 @@
 
 ## Requirements and scope
 
-Use a Linux Docker engine with Compose v2+, Python 3.9+, and Bash. Docker Desktop
+Use a Linux Docker engine with Compose v2+, or rootful Podman 4.9+ with
+`podman-compose` 1.5+, plus Python 3.9+ and Bash. Docker Desktop
 provides the Linux engine on macOS. The server automatically uses the engine's
 native amd64/arm64 architecture; the host Python architecture is irrelevant.
 Use a normal Linux VM runner in CI, such as `ubuntu-24.04`, rather than an
 unprivileged container runner.
 
 The S0 and disposable client containers are privileged because they mount FUSE
-and OverlayFS. Repository scratch and storage live in Docker named volumes on
+and OverlayFS. Repository scratch and storage live in container named volumes on
 the Linux engine, avoiding macOS bind-mounted scratch filesystems. Host CernVM-FS
 configuration and mounts are not changed.
 
 Only the S0, two replica HTTP endpoints, and Squid have published ports. These
 bind to `127.0.0.1` and use dynamically allocated ports. The object-store API is
-on the deployment's Docker network. Treat this as a disposable development
+on the deployment's container network. Treat this as a disposable development
 environment; it uses documented fixture credentials and is not a production
 deployment recipe.
 
 Ports are selected from free localhost ports during setup and then explicitly
 bound, so endpoint URLs stay stable across stop/start operations. If another
-process claims a selected port before Docker binds it, setup fails visibly;
+process claims a selected port before the engine binds it, setup fails visibly;
 collect diagnostics, run `down`, and retry `up`. A new deployment may use new ports.
+
+## Podman on Linux
+
+Install Podman and the standalone `podman-compose` provider. Docker and Docker
+Compose are not required for this path. For Ubuntu 24.04:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y podman python3-venv
+sudo python3 -m venv /opt/testbed-podman-compose
+sudo /opt/testbed-podman-compose/bin/pip install podman-compose==1.5.0
+sudo ln -s /opt/testbed-podman-compose/bin/podman-compose /usr/local/bin/podman-compose
+
+./bin/cvmfs-testbed up --runtime podman --sudo
+./bin/cvmfs-testbed inspect
+./bin/cvmfs-testbed down
+```
+
+`--sudo` uses `sudo -n` for engine/provider commands only; arrange noninteractive
+sudo access or refresh your sudo session before starting. When already running as
+root, omit this option. All later commands read the engine and sudo setting from
+state. `auto` tries an available Docker engine before Podman; explicit selection
+never silently switches engines. Rootless Podman is rejected because the real
+publisher requires privileged FUSE and OverlayFS mounts. Podman Machine on macOS
+and remote engines are not currently validated configurations.
+
+Every service has its own network namespace: the provider is run with
+`--in-pod false`. Nginx obtains its resolver from the container's `resolv.conf`,
+so object-store restarts work with either engine's DNS. Bind-mounted fixture
+configuration uses shared SELinux labels (`:z`).
 
 ## State and multiple deployments
 
@@ -37,7 +68,7 @@ cvmfs-testbed --state-dir /tmp/another-testbed up --project-name another-testbed
 
 Each state directory holds:
 
-- `state.json`: deployment ownership, selected platform, and CernVM-FS version;
+- `state.json`: deployment ownership, runtime, sudo setting, platform, and CernVM-FS version;
 - `runtime.env`: Compose interpolation settings;
 - `endpoints.json`: URLs, network, repository names, and public-key paths;
 - `keys/`: public signing keys copied from S0;
@@ -84,8 +115,8 @@ repositories = endpoints['repositories']
 ```
 
 Use `host` URLs for host processes. Use `internal` URLs after joining the
-deployment's Docker network. A URL containing `127.0.0.1` points at the calling
-container itself when used inside a container. The `.test` names are Docker
+deployment's container network. A URL containing `127.0.0.1` points at the calling
+container itself when used inside a container. The `.test` names are container
 network aliases, not host DNS names.
 
 The optional `client-read` starts a new client container on each invocation. It
@@ -103,7 +134,8 @@ cvmfs-testbed inspect | jq '.services.s1.published_ports'
 cvmfs-testbed inspect | jq '.networks'
 ```
 
-`inspect` queries Docker each time. Its `services` object is keyed by service
+`inspect` queries the selected engine each time and includes its `runtime` name.
+Its `services` object is keyed by service
 name and includes container ID/name, hostname, running/paused/health state, exit
 code, network IPv4/IPv6 addresses, gateway addresses, DNS aliases, and current
 published port mappings. Its `networks` object includes network IDs, drivers, and
@@ -137,9 +169,9 @@ cvmfs-testbed exec s1 -- cat /var/log/cvmfs/snapshots.log
 cvmfs-testbed exec squid -- cat /var/log/squid/access.log
 ```
 
-If Docker cannot mount FUSE or OverlayFS, check that the engine permits privileged
+If the engine cannot mount FUSE or OverlayFS, check that it permits privileged
 containers and supports those Linux filesystems. The publisher scratch directory
-must remain on the Docker volume. On Apple Silicon, leave `--platform` at `auto`;
+must remain on the container volume. On Apple Silicon, leave `--platform` at `auto`;
 emulated amd64 processes can exhaust the single-digit file descriptors used by
 CernVM-FS shell locks.
 
