@@ -15,7 +15,8 @@ flowchart LR
 ```
 
 Both the local CLI and the action use `testbed.py`. The Python controller invokes
-Docker Compose and `cvmfs_server` inside the services. It uses only Python's
+Docker Compose or `podman-compose` for orchestration, the selected engine for
+container operations, and `cvmfs_server` inside the services. It uses only Python's
 standard library. The JavaScript action has no npm dependencies; it invokes the
 same controller, exports outputs, and arranges post-job cleanup.
 
@@ -32,11 +33,14 @@ same controller, exports outputs, and arranges post-job cleanup.
 S0 and the optional client need mount privileges. The replicas, object store,
 frontend, and cache do not. Each Compose project has its own bridge network and
 named volumes. There are no fixed container names, host ports, or external DNS
-requirements. Servers' advertised names are scoped to this Docker network.
+requirements. Servers' advertised names are scoped to this container network.
+Rootful Podman runs services outside a shared pod so each has its own IP and
+failure boundary. The controller normalizes Docker and Podman network inspection
+into the same public JSON schema.
 
 ## Bootstrap
 
-1. Select the Docker engine's native architecture and build the server image.
+1. Select the runtime and its native architecture, then build the server image.
 2. Start the services and record published host ports.
 3. Create the S3 bucket using authenticated S3 requests.
 4. Run `cvmfs_server mkfs` for both repositories, generating fresh signing keys.
@@ -62,8 +66,8 @@ path-style S3 URL. CernVM-FS performs the actual object upload and replication.
 Nginx exposes no repository discovery index: `/cvmfs/info/` returns 404. Consumers
 must explicitly configure the repository names for this backend. Immutable data
 objects receive long-lived cache headers; mutable metadata must be revalidated.
-The frontend does not cache responses itself. Its Docker DNS lookup is refreshed
-to allow object-store recovery.
+The frontend does not cache responses itself. It reads the engine-provided DNS
+resolver from `resolv.conf` and refreshes lookups to allow object-store recovery.
 
 Squid caches immutable content but bypasses caching for mutable manifests,
 whitelists, status files, and discovery metadata. This fixture policy allows
@@ -71,7 +75,7 @@ fresh clients to see deliberately published revisions without sleeping for a
 metadata TTL. It is distinct from a production proxy's expiry policy.
 
 The fixed S3 credentials are local fixture values. The writer can administer the
-bucket; anonymous callers can read/list it on the private Docker network. No
+bucket; anonymous callers can read/list it on the private container network. No
 external S3 account, DNS service, credential, or production signing key is used.
 
 ## Control semantics
@@ -83,7 +87,10 @@ This is why a lag scenario remains stable while your consumer runs.
 Stopping a service retains its container and volumes. Restarting S0 restores its
 publishing mounts. Stopping `s1-s3` stops the HTTP frontend and worker together;
 stopping `object-store` leaves the frontend running and produces upstream errors.
-Pausing uses Docker's process freezer rather than changing configuration.
+Pausing uses the engine's process freezer. Readiness is checked by the controller
+using engine state/health and HTTP probes, without depending on Compose-specific
+`--wait` flags. Starting one service waits for that service only, so other
+intentional outages can remain in place.
 
 All mutations for a state directory take an advisory file lock. Independent
 deployments may run concurrently. Read-only `status` does not take the mutation

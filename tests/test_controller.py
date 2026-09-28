@@ -162,13 +162,18 @@ class InspectionTests(unittest.TestCase):
                 "Id": "abc",
                 "Name": "/sample-s0-1",
                 "Config": {"Hostname": "s0.testbed.test"},
-                "State": {"Status": "exited", "Running": False},
+                "State": {
+                    "Status": "exited",
+                    "Running": False,
+                    "Health": {"Status": ""},
+                },
                 "NetworkSettings": {"Networks": {}, "Ports": None},
             }
         )
         self.assertFalse(info["running"])
         self.assertEqual(info["published_ports"], [])
         self.assertEqual(info["networks"], {})
+        self.assertIsNone(info["health"])
 
 
 class RuntimeTests(unittest.TestCase):

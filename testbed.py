@@ -207,7 +207,8 @@ def container_info(container):
         "state": state["Status"],
         "running": state["Running"],
         "paused": state.get("Paused", False),
-        "health": (state.get("Health") or state.get("Healthcheck") or {}).get("Status"),
+        "health": (state.get("Health") or state.get("Healthcheck") or {}).get("Status")
+        or None,
         "exit_code": state.get("ExitCode"),
         "networks": networks,
         "published_ports": ports,
@@ -303,7 +304,22 @@ class Testbed:
                 else value
             )
 
-        return self.engine("cp", resolve(source), resolve(destination))
+        resolved_source, resolved_destination = resolve(source), resolve(destination)
+        self.engine("cp", resolved_source, resolved_destination)
+        if self.state().get("sudo", False) and resolved_destination == destination:
+            # Rootful Podman preserves container file ownership on export. Give
+            # the calling user access to just this exported file/directory tree.
+            run(
+                [
+                    "sudo",
+                    "-n",
+                    "chown",
+                    "-hR",
+                    "--",
+                    f"{os.getuid()}:{os.getgid()}",
+                    destination,
+                ]
+            )
 
     def inspect(self):
         state = self.state()
@@ -403,7 +419,7 @@ class Testbed:
         )
         try:
             # Build/pull before assigning host ports to minimize the reservation
-            # window. Explicit port bindings survive Docker stop/start cycles.
+            # window. Explicit port bindings survive container stop/start cycles.
             self.compose("build", "s0", timeout=1200)
             self.compose("pull", "object-store", "s1-s3", timeout=300)
             with contextlib.ExitStack() as stack:
@@ -516,7 +532,14 @@ class Testbed:
             ):
                 return
             time.sleep(0.5)
-        raise TestbedError(f"Timed out waiting for services: {', '.join(services)}")
+        summary = {
+            service: {
+                key: current.get(service, {}).get(key)
+                for key in ("state", "running", "paused", "health", "exit_code")
+            }
+            for service in services
+        }
+        raise TestbedError(f"Timed out waiting for services: {json.dumps(summary)}")
 
     def wait(self, *, synced=False, timeout=60):
         deadline = time.monotonic() + timeout

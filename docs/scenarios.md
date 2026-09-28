@@ -1,7 +1,7 @@
 # Fault scenarios and test integration
 
 The CLI is intended to be called by tests. Commands return only their result on
-stdout; Docker and CernVM-FS progress is written to stderr. `status` and
+stdout; container engine and CernVM-FS progress is written to stderr. `status` and
 `endpoints` always emit JSON. Mutating commands fail visibly and do not retry a
 failed publication behind the test's back.
 
