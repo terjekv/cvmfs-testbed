@@ -42,8 +42,9 @@ sudo ln -s /opt/testbed-podman-compose/bin/podman-compose /usr/local/bin/podman-
 ./bin/cvmfs-testbed down
 ```
 
-`--sudo` uses `sudo -n` for engine/provider commands only; arrange noninteractive
-sudo access or refresh your sudo session before starting. When already running as
+`--sudo` uses `sudo -n` for engine/provider commands and to restore your ownership
+of exported public keys and logs. Arrange noninteractive sudo access or refresh
+your sudo session before starting. When already running as
 root, omit this option. All later commands read the engine and sudo setting from
 state. `auto` tries an available Docker engine before Podman; explicit selection
 never silently switches engines. Rootless Podman is rejected because the real

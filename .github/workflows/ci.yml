@@ -63,6 +63,8 @@ jobs:
           curl --fail "$S0_URL/cvmfs/software.testbed.test/.cvmfspublished" -o /tmp/manifest
       - name: Exercise the deployment
         run: python3 tests/integration.py
+      - name: Leave a paused service for post-job cleanup
+        run: cvmfs-testbed pause s1
       - name: Collect diagnostics
         if: always()
         run: ./bin/cvmfs-testbed logs --output artifacts/testbed
