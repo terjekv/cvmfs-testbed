@@ -1,0 +1,63 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Python unit tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Action lifecycle tests
+        run: node --test tests/action.test.js
+      - name: Shell checks
+        run: shellcheck bin/cvmfs-testbed containers/server/*.sh
+
+  integration:
+    name: Live testbed (${{ matrix.runner }})
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      CVMFS_TESTBED_STATE: ${{ github.workspace }}/.cvmfs-testbed
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start proposed action
+        id: testbed
+        uses: ./
+        with:
+          state-directory: ${{ env.CVMFS_TESTBED_STATE }}
+      - name: Verify action outputs and CLI installation
+        env:
+          S0_URL: ${{ steps.testbed.outputs.s0-url }}
+        run: |
+          cvmfs-testbed status
+          test -r "$CVMFS_TESTBED_ENDPOINTS"
+          curl --fail "$S0_URL/cvmfs/software.testbed.test/.cvmfspublished" -o /tmp/manifest
+      - name: Exercise the deployment
+        run: python3 tests/integration.py
+      - name: Collect diagnostics
+        if: always()
+        run: ./bin/cvmfs-testbed logs --output artifacts/testbed
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: testbed-${{ matrix.runner }}
+          path: artifacts/testbed
+          retention-days: 7

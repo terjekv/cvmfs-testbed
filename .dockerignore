@@ -1,0 +1,4 @@
+.git
+.cvmfs-testbed
+artifacts
+**/__pycache__

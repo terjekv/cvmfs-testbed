@@ -1,0 +1,10 @@
+{
+  "identities": [
+    {
+      "name": "testbed-writer",
+      "credentials": [{"accessKey": "testbed", "secretKey": "testbed-only-secret"}],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    },
+    {"name": "anonymous", "actions": ["Read:cvmfs", "List:cvmfs"]}
+  ]
+}

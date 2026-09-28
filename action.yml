@@ -1,0 +1,44 @@
+name: CernVM-FS testbed
+description: Start disposable Stratum 0, local and S3 Stratum 1 servers, and a Squid cache.
+author: Terje Kvernes
+branding:
+  icon: server
+  color: blue
+inputs:
+  state-directory:
+    description: State directory (defaults to a unique directory under runner.temp).
+    required: false
+  project-name:
+    description: Optional unique Docker Compose project name.
+    required: false
+  cvmfs-version:
+    description: CernVM-FS package version.
+    default: '2.14.1'
+  platform:
+    description: Docker platform; auto selects the Linux engine's native architecture.
+    default: auto
+  cleanup:
+    description: Remove the deployment in the post-job step.
+    default: 'true'
+outputs:
+  state-directory:
+    description: Directory containing testbed state and endpoints.json.
+  endpoints-file:
+    description: JSON containing host URLs, Docker network URLs, repositories, and public keys.
+  keys-directory:
+    description: Directory containing the generated public signing keys.
+  network:
+    description: Docker network to join from containerized tests.
+  s0-url:
+    description: Stratum 0 origin reachable from the runner host.
+  s1-url:
+    description: Local-storage Stratum 1 origin reachable from the runner host.
+  s1-s3-url:
+    description: S3-backed Stratum 1 origin reachable from the runner host.
+  proxy-url:
+    description: Squid proxy URL reachable from the runner host.
+runs:
+  using: node24
+  main: action/index.js
+  post: action/post.js
+  post-if: always()

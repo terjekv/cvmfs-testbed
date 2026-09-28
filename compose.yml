@@ -1,0 +1,115 @@
+x-server: &server
+  image: ${TESTBED_IMAGE}
+  platform: ${TESTBED_PLATFORM}
+  build:
+    context: .
+    dockerfile: containers/server/Dockerfile
+    args:
+      CVMFS_VERSION: ${CVMFS_VERSION}
+  init: true
+  stop_grace_period: 20s
+  networks: [testbed]
+
+services:
+  s0:
+    <<: *server
+    hostname: s0.testbed.test
+    privileged: true
+    environment:
+      TESTBED_ROLE: s0
+    healthcheck:
+      test: ["CMD", "test", "-f", "/run/testbed-ready"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+    ports: ["127.0.0.1:${S0_PORT:-0}:80"]
+    volumes:
+      - s0-spool:/var/spool/cvmfs
+      - s0-storage:/srv/cvmfs
+      - public-keys:/public-keys
+    networks:
+      testbed:
+        aliases: [s0.testbed.test]
+
+  s1:
+    <<: *server
+    hostname: s1.testbed.test
+    environment:
+      TESTBED_ROLE: s1
+    healthcheck:
+      test: ["CMD", "test", "-f", "/run/testbed-ready"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+    ports: ["127.0.0.1:${S1_PORT:-0}:80"]
+    volumes:
+      - s1-storage:/srv/cvmfs
+      - public-keys:/public-keys:ro
+    networks:
+      testbed:
+        aliases: [s1.testbed.test]
+
+  s1-s3-worker:
+    <<: *server
+    environment:
+      TESTBED_ROLE: s1-s3
+    volumes:
+      - public-keys:/public-keys:ro
+
+  object-store:
+    image: chrislusf/seaweedfs:4.47
+    platform: ${TESTBED_PLATFORM}
+    command:
+      - server
+      - -ip=object-store
+      - -dir=/data
+      - -volume.max=4
+      - -master.volumeSizeLimitMB=64
+      - -s3
+      - -s3.port=8333
+      - -s3.config=/etc/seaweedfs/s3.json
+    volumes:
+      - object-data:/data
+      - ./containers/s3/identities.json:/etc/seaweedfs/s3.json:ro
+    networks: [testbed]
+
+  s1-s3:
+    image: nginx:1.28.0-alpine
+    platform: ${TESTBED_PLATFORM}
+    ports: ["127.0.0.1:${S3_PORT:-0}:80"]
+    volumes:
+      - ./containers/s3/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      testbed:
+        aliases: [s1-s3.testbed.test]
+
+  squid:
+    <<: *server
+    environment:
+      TESTBED_ROLE: squid
+    ports: ["127.0.0.1:${SQUID_PORT:-0}:3128"]
+    volumes:
+      - squid-cache:/var/spool/squid
+    networks:
+      testbed:
+        aliases: [squid.testbed.test]
+
+  client:
+    <<: *server
+    profiles: [client]
+    privileged: true
+    entrypoint: [/opt/testbed/client-read.sh]
+    volumes:
+      - public-keys:/public-keys:ro
+
+networks:
+  testbed:
+    name: ${TESTBED_PROJECT}_network
+
+volumes:
+  s0-spool:
+  s0-storage:
+  s1-storage:
+  public-keys:
+  object-data:
+  squid-cache:
